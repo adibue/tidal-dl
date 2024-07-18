@@ -8,16 +8,16 @@
 @Contact :   yaronhuang@foxmail.com
 @Desc    :   tidal api
 '''
+import json
 import random
-import re
 import time
-from typing import List
-from xml.etree import ElementTree
-
+import aigpy
+import base64
 import requests
 
-from model import *
-from settings import *
+from tidal_dl.model import *
+from tidal_dl.enums import *
+from tidal_dl.settings import *
 
 # SSL Warnings | retry number
 requests.packages.urllib3.disable_warnings()
@@ -38,13 +38,6 @@ class TidalAPI(object):
         for index in range(0, 3):
             try:
                 respond = requests.get(urlpre + path, headers=header, params=params)
-                if respond.url.find("playbackinfopostpaywall") != -1 and SETTINGS.downloadDelay is not False:
-                    # random sleep between 0.5 and 5 seconds and print it
-                    sleep_time = random.randint(500, 5000) / 1000
-                    print(
-                        f"Sleeping for {sleep_time} seconds, to mimic human behaviour and prevent too many requests error")
-                    time.sleep(sleep_time)
-
                 if respond.status_code == 429:
                     print('Too many requests, waiting for 20 seconds...')
                     # Loop countdown 20 seconds and print the remaining time
@@ -108,7 +101,7 @@ class TidalAPI(object):
     def __post__(self, path, data, auth=None, urlpre='https://auth.tidal.com/v1/oauth2'):
         for index in range(3):
             try:
-                result = requests.post(urlpre + path, data=data, auth=auth, verify=False).json()
+                result = requests.post(urlpre+path, data=data, auth=auth, verify=False).json()
                 return result
             except Exception as e:
                 if index == 2:
@@ -156,7 +149,6 @@ class TidalAPI(object):
     def verifyAccessToken(self, accessToken) -> bool:
         header = {'authorization': 'Bearer {}'.format(accessToken)}
         result = requests.get('https://api.tidal.com/v1/sessions', headers=header).json()
-
         if 'status' in result and result['status'] != 200:
             return False
         return True
@@ -188,12 +180,11 @@ class TidalAPI(object):
 
         if not aigpy.string.isNull(userid):
             if str(result['userId']) != str(userid):
-                raise Exception("User mismatch! Please use your own accesstoken.", )
+                raise Exception("User mismatch! Please use your own accesstoken.",)
 
         self.key.userId = result['userId']
         self.key.countryCode = result['countryCode']
         self.key.accessToken = accessToken
-
         return
 
     def getAlbum(self, id) -> Album:
@@ -201,13 +192,6 @@ class TidalAPI(object):
 
     def getPlaylist(self, id) -> Playlist:
         return aigpy.model.dictToModel(self.__get__('playlists/' + str(id)), Playlist())
-    
-    def getPlaylistSelf(self) -> List[Playlist]:
-        ret = self.__get__(f'users/{self.key.userId}/playlists')
-        playlists = []
-        for item in ret['items']:
-            playlists.append(aigpy.model.dictToModel(item, Playlist()))
-        return playlists
 
     def getArtist(self, id) -> Artist:
         return aigpy.model.dictToModel(self.__get__('artists/' + str(id)), Artist())
@@ -241,7 +225,6 @@ class TidalAPI(object):
 
     def search(self, text: str, type: Type, offset: int = 0, limit: int = 10) -> SearchResult:
         typeStr = type.name.upper() + "S"
-
         if type == Type.Null:
             typeStr = "ARTISTS,ALBUMS,TRACKS,VIDEOS,PLAYLISTS"
 
@@ -297,60 +280,6 @@ class TidalAPI(object):
         albums += list(aigpy.model.dictToModel(item, Album()) for item in data)
         return albums
 
-    # from https://github.com/Dniel97/orpheusdl-tidal/blob/master/interface.py#L582
-    def parse_mpd(self, xml: bytes) -> list:
-        # Removes default namespace definition, don't do that!
-        xml = re.sub(r'xmlns="[^"]+"', '', xml, count=1)
-        root = ElementTree.fromstring(xml)
-
-        # List of AudioTracks
-        tracks = []
-
-        for period in root.findall('Period'):
-            for adaptation_set in period.findall('AdaptationSet'):
-                for rep in adaptation_set.findall('Representation'):
-                    # Check if representation is audio
-                    content_type = adaptation_set.get('contentType')
-                    if content_type != 'audio':
-                        raise ValueError('Only supports audio MPDs!')
-
-                    # Codec checks
-                    codec = rep.get('codecs').upper()
-                    if codec.startswith('MP4A'):
-                        codec = 'AAC'
-
-                    # Segment template
-                    seg_template = rep.find('SegmentTemplate')
-                    # Add init file to track_urls
-                    track_urls = [seg_template.get('initialization')]
-                    start_number = int(seg_template.get('startNumber') or 1)
-
-                    # https://dashif-documents.azurewebsites.net/Guidelines-TimingModel/master/Guidelines-TimingModel.html#addressing-explicit
-                    # Also see example 9
-                    seg_timeline = seg_template.find('SegmentTimeline')
-                    if seg_timeline is not None:
-                        seg_time_list = []
-                        cur_time = 0
-
-                        for s in seg_timeline.findall('S'):
-                            # Media segments start time
-                            if s.get('t'):
-                                cur_time = int(s.get('t'))
-
-                            # Segment reference
-                            for i in range((int(s.get('r') or 0) + 1)):
-                                seg_time_list.append(cur_time)
-                                # Add duration to current time
-                                cur_time += int(s.get('d'))
-
-                        # Create list with $Number$ indices
-                        seg_num_list = list(range(start_number, len(seg_time_list) + start_number))
-                        # Replace $Number$ with all the seg_num_list indices
-                        track_urls += [seg_template.get('media').replace('$Number$', str(n)) for n in seg_num_list]
-
-                    tracks.append(track_urls)
-        return tracks
-
     def getStreamUrl(self, id, quality: AudioQuality):
         squality = "HI_RES"
         if quality == AudioQuality.Normal:
@@ -359,8 +288,6 @@ class TidalAPI(object):
             squality = "HIGH"
         elif quality == AudioQuality.HiFi:
             squality = "LOSSLESS"
-        elif quality == AudioQuality.Max:
-            squality = "HI_RES_LOSSLESS"
 
         paras = {"audioquality": squality, "playbackmode": "STREAM", "assetpresentation": "FULL"}
         data = self.__get__(f'tracks/{str(id)}/playbackinfopostpaywall', paras)
@@ -374,20 +301,9 @@ class TidalAPI(object):
             ret.codec = manifest['codecs']
             ret.encryptionKey = manifest['keyId'] if 'keyId' in manifest else ""
             ret.url = manifest['urls'][0]
-            ret.urls = [ret.url]
             return ret
-        elif "dash+xml" in resp.manifestMimeType:
-            xmldata = base64.b64decode(resp.manifest).decode('utf-8')
-            ret = StreamUrl()
-            ret.trackid = resp.trackid
-            ret.soundQuality = resp.audioQuality
-            ret.codec = aigpy.string.getSub(xmldata, 'codecs="', '"')
-            ret.encryptionKey = ""  # manifest['keyId'] if 'keyId' in manifest else ""
-            ret.urls = self.parse_mpd(xmldata)[0]
-            if len(ret.urls) > 0:
-                ret.url = ret.urls[0]
-            return ret
-
+        # else:
+        #     manifest = json.loads(base64.b64decode(resp.manifest).decode('utf-8'))
         raise Exception("Can't get the streamUrl, type is " + resp.manifestMimeType)
 
     def getVideoStreamUrl(self, id, quality: VideoQuality):
@@ -482,6 +398,7 @@ class TidalAPI(object):
                 continue
 
         raise Exception("No result.")
+
 
 # Singleton
 TIDAL_API = TidalAPI()
